@@ -1,0 +1,107 @@
+"""
+This is an upgraded version of Ceshine's LGBM starter script, simply adding more
+average features and weekly average features on it.
+"""
+
+
+from datetime import date, timedelta
+import time
+import pandas as pd
+import numpy as np
+from sklearn.metrics import mean_squared_error
+import lightgbm as lgb
+camino = './input/' #google drive
+camino = '/Users/gabrielkreplak/Documents/Gabi/UOC/Materiales/E4 Big Data y Sistemas NoSQL/B2.342 Trabajo Final de Master MIB-AD/Favorita/input/'
+
+start_time = time.time()
+
+
+X_train = pd.read_csv(camino + 'temp/X_train.csv')
+y_train = np.array(pd.read_csv(camino + 'temp/y_train.csv'))
+X_val = pd.read_csv(camino + 'temp/X_val.csv')
+y_val = np.array(pd.read_csv(camino + 'temp/y_val.csv'))
+X_test = pd.read_csv(camino + 'temp/X_test.csv')
+stores_items = pd.read_csv(camino + 'temp/stores_items.csv', index_col=['store_nbr', 'item_nbr'])
+
+test_ids = pd.read_csv(camino + "test.csv", usecols=[0, 1, 2, 3, 4], dtype={'onpromotion': bool}, parse_dates=["date"]  # , date_parser=parser
+).set_index(['store_nbr', 'item_nbr', 'date'])
+
+
+items = pd.read_csv( camino + 'items.csv' ).set_index("item_nbr")
+items = items.reindex( stores_items.index.get_level_values(1) )
+
+print("Training and predicting models...")
+params = {
+    'num_leaves': 63,#
+    'objective': 'regression',#
+    'min_data_in_leaf': 300,#
+#    'learning_rate': 0.1, #score 0.529, 'min_data_in_leaf': 300
+#    'learning_rate': 0.06, #score 0.515, 'min_data_in_leaf': 300
+#    'learning_rate': 0.05, #score 0.515, 'min_data_in_leaf': 300
+#    'learning_rate': 0.025, #score 0.516, 'min_data_in_leaf': 300
+#    'learning_rate': 0.01, #score 0.517, 'min_data_in_leaf': 300
+	'learning_rate': 0.03 ,#
+    'feature_fraction': 0.8,#
+    'bagging_fraction': 0.8,#
+    'bagging_freq': 2,
+    'metric': 'l2',#
+    'num_threads': 4,
+	'max_bin': 500,#
+	'num_iterations': 200
+}
+
+MAX_ROUNDS = 500
+val_pred = []
+test_pred = []
+cate_vars = []#
+for i in range(16):
+    print("=" * 50)
+    print("Step %d" % (i+1))
+    print("=" * 50)
+    dtrain = lgb.Dataset(
+        X_train, label=y_train[:, i],
+        categorical_feature=cate_vars,
+        weight=pd.concat([items["perishable"]] * 6) * 0.25 + 1)
+
+    dval = lgb.Dataset(
+        X_val, label=y_val[:, i], reference=dtrain,
+        weight=items["perishable"] * 0.25 + 1,
+        categorical_feature=cate_vars)
+
+    bst = lgb.train(
+        params, dtrain, num_boost_round=MAX_ROUNDS,
+        valid_sets=[dtrain, dval], early_stopping_rounds=50, verbose_eval=100)
+
+    print("\n".join(("%s: %.2f" % x) for x in sorted(
+        zip(X_train.columns, bst.feature_importance("gain")),
+        key=lambda x: x[1], reverse=True)))
+
+    val_pred. append(bst.predict(X_val,  num_iteration=bst.best_iteration or MAX_ROUNDS))
+    test_pred.append(bst.predict(X_test, num_iteration=bst.best_iteration or MAX_ROUNDS))
+
+    t = (time.time ( ) - start_time) / 60
+    print ( "Time %s min" % t )
+
+
+n_public = 5  # Number of days in public test set
+weights = pd.concat ( [ items[ "perishable" ] ] ) * 0.25 + 1
+print ( "Unweighted validation mse: " , mean_squared_error (y_val                  , np.array ( val_pred ).transpose ( ) ) )
+print ( "Full validation mse:       " , mean_squared_error (y_val                  , np.array ( val_pred ).transpose ( ) , sample_weight=weights ) )
+print ( "'Public' validation mse:   " , mean_squared_error (y_val[ : , :n_public ] , np.array ( val_pred ).transpose ( )[ : , :n_public ] , sample_weight=weights ) )
+print ( "'Private' validation mse:  " , mean_squared_error (y_val[ : , n_public: ] , np.array ( val_pred ).transpose ( )[ : , n_public: ] , sample_weight=weights ) )
+
+
+
+print("Making submission...")
+y_test = np.array(test_pred).transpose()
+df_preds = pd.DataFrame( y_test, index=stores_items.index, columns=pd.date_range("2017-08-16", periods=16)).stack().to_frame("unit_sales")
+
+df_preds.index.set_names(["store_nbr", "item_nbr", "date"], inplace=True)
+
+submission = test_ids[['id']].join(df_preds, how="left").fillna(0)
+submission["unit_sales"] = np.clip(np.expm1(submission["unit_sales"]), 0, 1000)
+submission.to_csv(camino + 'out/lgb_ceshine.csv', float_format='%.4f', index=None)
+
+
+t = (time.time() - start_time)/60
+print ("Total processing time %s min" % t)
